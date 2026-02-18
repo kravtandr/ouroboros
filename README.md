@@ -64,7 +64,7 @@ Telegram --> colab_launcher.py
 
 1. Open Telegram and search for [@BotFather](https://t.me/BotFather).
 2. Send `/newbot` and follow the prompts to choose a name and username.
-3. Copy the **bot token** (a string like `123456789:ABCdefGHIjklMNOpqrsTUVwxyz`).
+3. Copy the **bot token**.
 4. You will use this token as `TELEGRAM_BOT_TOKEN` in the next step.
 
 ### Step 2: Get API Keys
