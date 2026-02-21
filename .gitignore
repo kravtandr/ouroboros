@@ -1,8 +1,12 @@
 # Secrets
 .env
 .env.*
+!.env.example
 *.key
 *.pem
+
+# Local data (state, logs, memory — created by local_launcher.py)
+/data/
 
 # IDE
 .cursor/

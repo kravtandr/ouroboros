@@ -62,7 +62,7 @@ Telegram --> colab_launcher.py
 
 ---
 
-## Quick Start (Google Colab)
+## Quick Start (Local)
 
 ### Step 1: Create a Telegram Bot
 
@@ -82,13 +82,47 @@ Telegram --> colab_launcher.py
 | `OPENAI_API_KEY` | No | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) -- Enables web search tool |
 | `ANTHROPIC_API_KEY` | No | [console.anthropic.com/settings/keys](https://console.anthropic.com/settings/keys) -- Enables Claude Code CLI |
 
-### Step 3: Set Up Google Colab
+### Step 3: Clone, Configure, Run
+
+```bash
+# 1. Fork this repo on GitHub, then clone your fork
+git clone https://github.com/YOUR_USERNAME/ouroboros.git
+cd ouroboros
+
+# 2. Create .env from the template and fill in your API keys
+cp .env.example .env
+# Edit .env — fill in OPENROUTER_API_KEY, TELEGRAM_BOT_TOKEN, TOTAL_BUDGET,
+# GITHUB_TOKEN, GITHUB_USER, and optionally OPENAI_API_KEY / ANTHROPIC_API_KEY
+
+# 3. Install dependencies (Python 3.10+)
+pip install -r requirements.txt
+
+# 4. Run
+python local_launcher.py
+```
+
+### Step 4: Start Chatting
+
+Open your Telegram bot and send any message. The first person to write becomes the **creator** (owner). All subsequent messages from other users are kindly ignored.
+
+Agent state is stored in the `data/` directory (logs, memory, state). All code changes are pushed to your fork.
+
+**Restarting:** Just re-run `python local_launcher.py`. Evolution is preserved — all changes are in git, and state is in `data/`.
+
+---
+
+## Quick Start (Google Colab)
+
+<details>
+<summary>Click to expand Colab instructions</summary>
+
+### Step 1: Set Up Google Colab
 
 1. Open a new notebook at [colab.research.google.com](https://colab.research.google.com/).
 2. Go to the menu: **Runtime > Change runtime type** and select a **GPU** (optional, but recommended for browser automation).
 3. Click the **key icon** in the left sidebar (Secrets) and add each API key from the table above. Make sure "Notebook access" is toggled on for each secret.
 
-### Step 4: Fork and Run
+### Step 2: Fork and Run
 
 1. **Fork** this repository on GitHub: click the **Fork** button at the top of the page.
 2. Paste the following into a Google Colab cell and press **Shift+Enter** to run:
@@ -126,11 +160,13 @@ for k, v in CFG.items():
 %run colab_bootstrap_shim.py
 ```
 
-### Step 5: Start Chatting
+### Step 3: Start Chatting
 
 Open your Telegram bot and send any message. The first person to write becomes the **creator** (owner). All subsequent messages from other users are kindly ignored.
 
 **Restarting:** If Colab disconnects or you restart the runtime, just re-run the same cell. Your Ouroboros's evolution is preserved -- all changes are pushed to your fork, and agent state lives on Google Drive.
+
+</details>
 
 ---
 
