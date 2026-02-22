@@ -25,7 +25,7 @@ from ouroboros.utils import utc_now_iso, append_jsonl, truncate_for_log, sanitiz
 
 log = logging.getLogger(__name__)
 
-# Pricing from OpenRouter API (2026-02-17). Update periodically via /api/v1/models.
+# Pricing from OpenRouter API (2026-02-22). Update periodically via /api/v1/models.
 _MODEL_PRICING_STATIC = {
     "anthropic/claude-opus-4.6": (5.0, 0.5, 25.0),
     "anthropic/claude-opus-4": (15.0, 1.5, 75.0),
@@ -40,6 +40,8 @@ _MODEL_PRICING_STATIC = {
     "openai/gpt-5.2-codex": (1.75, 0.175, 14.0),
     "google/gemini-2.5-pro-preview": (1.25, 0.125, 10.0),
     "google/gemini-3-pro-preview": (2.0, 0.20, 12.0),
+    "google/gemini-3.1-pro-preview": (2.0, 0.20, 12.0),
+    "google/gemini-3-flash-preview": (0.50, 0.05, 3.0),
     "x-ai/grok-3-mini": (0.30, 0.03, 0.50),
     "qwen/qwen3.5-plus-02-15": (0.40, 0.04, 2.40),
 }
