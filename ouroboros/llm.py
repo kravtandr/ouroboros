@@ -389,7 +389,7 @@ class LocalLLMClient(LLMClient):
 # ---------------------------------------------------------------------------
 
 # Tokens threshold above which we don't use local LLM (too slow / not capable)
-_LOCAL_MAX_CONTEXT_CHARS = 32_000  # ~8k tokens roughly
+_LOCAL_MAX_CONTEXT_CHARS = 800_000  # ~200k tokens — Qwen 400B has 262K context
 
 # High-quality model keywords — never route these to local
 _HIGH_QUALITY_KEYWORDS = ("opus", "/o3", "/o4", "o3-pro", "gemini-2.5-pro", "gemini-3-pro")
@@ -418,8 +418,9 @@ class LocalModelRouter:
         self._local_client: Optional[LocalLLMClient] = None
 
     def _local_url(self) -> Optional[str]:
-        """Returns LOCAL_LLM_URL if set, else None (feature disabled)."""
-        return os.environ.get("LOCAL_LLM_URL", "").strip() or None
+        """Returns LOCAL_LLM_URL or LOCAL_LLM_BASE_URL if set, else None."""
+        url = os.environ.get("LOCAL_LLM_URL") or os.environ.get("LOCAL_LLM_BASE_URL")
+        return url.strip().rstrip("/") if url else None
 
     def _check_health(self) -> bool:
         """Ping local API /models endpoint. Returns True if reachable."""
@@ -471,9 +472,7 @@ class LocalModelRouter:
         if not self.is_available():
             return False
 
-        # Tools need capable models
-        if tools:
-            return False
+        # Local Qwen 400B supports tool calling natively — no restriction on tools
 
         # High-quality model explicitly requested
         model_lower = model.lower()
@@ -500,7 +499,7 @@ class LocalModelRouter:
 
     def get_local_model(self) -> str:
         """Return the local model name from env, default 'local'."""
-        return os.environ.get("LOCAL_LLM_MODEL", "local").strip() or "local"
+        return os.environ.get("LOCAL_LLM_MODEL", "qwen-400b").strip() or "qwen-400b"
 
     def invalidate(self) -> None:
         """Force re-check on next call (e.g., after SSH tunnel reconnect)."""

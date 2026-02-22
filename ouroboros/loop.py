@@ -847,11 +847,15 @@ def _call_llm_with_retry(
     """
     msg = None
     last_error: Optional[Exception] = None
-    # Route to local backend if model starts with "local/"
+    # Route to local backend if model starts with "local/" (explicit) or auto-route
     if model.startswith("local/"):
         active_llm = _local_router.get_local_client()
         # Strip "local/" prefix - the actual API only knows the bare model name
         model_for_call = model[len("local/"):]
+    elif _local_router.should_use_local(model, messages, tools):
+        # Auto-route to local LLM: available, context small, not high-quality model
+        active_llm = _local_router.get_local_client()
+        model_for_call = _local_router.get_local_model()
     else:
         active_llm = llm
         model_for_call = model

@@ -259,6 +259,13 @@ Full text: [BIBLE.md](BIBLE.md)
 
 ## Changelog
 
+### v6.4.0 -- Local LLM auto-routing + switch_model fix
+- **Auto-routing**: `_call_llm_with_retry` now calls `should_use_local()` — eligible requests route to Qwen 400B automatically without `local/` prefix.
+- **switch_model fix**: `local/` prefix now correctly validates against local endpoint availability, not OpenRouter model list.
+- **LOCAL_LLM_URL fallback**: `_local_url()` reads both `LOCAL_LLM_URL` and `LOCAL_LLM_BASE_URL` env vars.
+- **Local model default**: Updated default local model name to `qwen-400b`.
+- **Tool calling unblocked**: Local Qwen 400B supports tool calling — removed the tool-blocking guard in `should_use_local`.
+
 ### v6.3.1 -- Local LLM: reasoning_content capture + max_tokens fix
 - **reasoning_content capture**: LocalLLMClient extracts `reasoning_content` from thinking-model responses (Qwen, DeepSeek), logs reasoning token count, emits 💭 progress message, and records to events.jsonl.
 - **max_tokens default raised**: 4096 → 8192 for LocalLLMClient — ensures thinking models finish their reasoning chain before emitting answer.

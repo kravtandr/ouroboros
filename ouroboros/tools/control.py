@@ -169,7 +169,7 @@ def _switch_model(ctx: ToolContext, model: str = "", effort: str = "") -> str:
     changes = []
 
     if model:
-        if LLMClient.is_local_model(model):
+        if model.startswith("local/"):
             # Local model — validate against LM Studio if available
             backend = LocalLLMBackend()
             if backend.enabled():
