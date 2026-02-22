@@ -1,19 +1,17 @@
 """
 Ouroboros — LLM client.
 
-The only module that communicates with the LLM API (OpenRouter or local backend).
+The only module that communicates with the LLM API (OpenRouter).
 Contract: chat(), default_model(), available_models(), add_usage().
 
-Local backend support:
-- LM Studio (or any OpenAI-compatible server) via LOCAL_LLM_URL env var
-- Models prefixed with 'local/' are routed to the local backend
-- Local backend is optional and gracefully falls back to cloud if unavailable
+Also provides LocalModelRouter for routing simple tasks to local LM Studio.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -107,171 +105,8 @@ def fetch_openrouter_pricing() -> Dict[str, Tuple[float, float, float]]:
         return {}
 
 
-# ---------------------------------------------------------------------------
-# Local LLM Backend (LM Studio / any OpenAI-compatible server)
-# ---------------------------------------------------------------------------
-
-class LocalLLMBackend:
-    """
-    Local LLM backend for LM Studio or any OpenAI-compatible server.
-
-    Configured via environment variables:
-    - LOCAL_LLM_URL: Base URL of the local API (e.g. http://localhost:1234/v1)
-    - LOCAL_LLM_MODEL: Default model name as known to LM Studio
-    - LOCAL_LLM_ENABLED: 'true'/'false', default 'false'
-
-    Models are identified by 'local/' prefix (e.g. 'local/llama-3.3-70b').
-    The prefix is stripped when making actual API calls.
-    """
-
-    def __init__(self) -> None:
-        self._client = None
-        self._client_url_cache: str = ""
-        self._last_health_check: float = 0.0
-        self._last_health_result: bool = False
-        self._health_cache_sec: float = 60.0
-
-    @property
-    def base_url(self) -> str:
-        return os.environ.get("LOCAL_LLM_URL", "http://localhost:1234/v1")
-
-    @property
-    def enabled(self) -> bool:
-        return os.environ.get("LOCAL_LLM_ENABLED", "false").lower() == "true"
-
-    @property
-    def default_model(self) -> str:
-        return os.environ.get("LOCAL_LLM_MODEL", "local-model")
-
-    def is_healthy(self) -> bool:
-        """
-        Check if local LLM server is reachable.
-        Result is cached for health_cache_sec seconds.
-        """
-        if not self.enabled:
-            return False
-        now = time.time()
-        if now - self._last_health_check < self._health_cache_sec:
-            return self._last_health_result
-        try:
-            import requests
-            url = self.base_url.rstrip("/")
-            # Strip /v1 suffix if present to get /v1/models
-            if url.endswith("/v1"):
-                models_url = url + "/models"
-            else:
-                models_url = url + "/v1/models"
-            resp = requests.get(
-                models_url,
-                timeout=3,
-                headers={"Authorization": "Bearer lm-studio"},
-            )
-            result = resp.status_code == 200
-        except Exception as e:
-            log.debug("Local LLM health check failed: %s", e)
-            result = False
-        self._last_health_check = now
-        self._last_health_result = result
-        log.debug("Local LLM health check: %s -> %s", self.base_url, result)
-        return result
-
-    def list_models(self) -> List[str]:
-        """Return list of model IDs available in LM Studio. Empty on failure."""
-        if not self.enabled:
-            return []
-        try:
-            import requests
-            url = self.base_url.rstrip("/")
-            if url.endswith("/v1"):
-                models_url = url + "/models"
-            else:
-                models_url = url + "/v1/models"
-            resp = requests.get(models_url, timeout=3,
-                                headers={"Authorization": "Bearer lm-studio"})
-            if resp.status_code == 200:
-                data = resp.json()
-                return [m["id"] for m in data.get("data", []) if m.get("id")]
-        except Exception:
-            pass
-        return []
-
-    def _get_client(self):
-        """Lazy-init OpenAI client. Rebuilds if base_url changed (e.g. new ngrok URL)."""
-        current_url = self.base_url
-        if self._client is None or self._client_url_cache != current_url:
-            from openai import OpenAI
-            self._client = OpenAI(
-                base_url=current_url,
-                api_key="lm-studio",  # LM Studio requires any non-empty key
-            )
-            self._client_url_cache = current_url
-        return self._client
-
-    def chat(
-        self,
-        messages: List[Dict[str, Any]],
-        model: str,
-        tools: Optional[List[Dict[str, Any]]] = None,
-        max_tokens: int = 8192,
-        **kwargs,
-    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        """
-        Chat with local backend.
-
-        Returns (message_dict, usage_dict).
-        Cost is always 0.0 for local models.
-        """
-        client = self._get_client()
-        # Strip 'local/' prefix — LM Studio uses its own model IDs
-        actual_model = model.removeprefix("local/") if model.startswith("local/") else model
-
-        call_kwargs: Dict[str, Any] = {
-            "model": actual_model,
-            "messages": messages,
-            "max_tokens": max_tokens,
-        }
-
-        if tools:
-            # Strip cache_control and other OpenRouter-specific extensions
-            # Local models use standard OpenAI tool format
-            clean_tools = []
-            for t in tools:
-                clean_t = {k: v for k, v in t.items() if k not in ("cache_control",)}
-                clean_tools.append(clean_t)
-            call_kwargs["tools"] = clean_tools
-            call_kwargs["tool_choice"] = "auto"
-
-        resp = client.chat.completions.create(**call_kwargs)
-        resp_dict = resp.model_dump()
-        choices = resp_dict.get("choices") or [{}]
-        msg = (choices[0] if choices else {}).get("message") or {}
-        usage = resp_dict.get("usage") or {}
-
-        # Local models are free — cost is always 0
-        usage["cost"] = 0.0
-        usage["local"] = True  # mark as local for logging/routing decisions
-
-        return msg, usage
-
-
-# Module-level singleton — shared health cache across all LLMClient instances
-_local_backend = LocalLLMBackend()
-
-
-# ---------------------------------------------------------------------------
-# Main LLM Client
-# ---------------------------------------------------------------------------
-
 class LLMClient:
-    """
-    Multi-backend LLM client.
-
-    Routes requests to:
-    - OpenRouter (default) for cloud models
-    - LocalLLMBackend for models prefixed with 'local/'
-
-    All LLM calls in Ouroboros go through this class.
-    """
+    """OpenRouter API wrapper. All LLM calls go through this class."""
 
     def __init__(
         self,
@@ -281,27 +116,6 @@ class LLMClient:
         self._api_key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
         self._base_url = base_url
         self._client = None
-
-    @staticmethod
-    def is_local_model(model: str) -> bool:
-        """Return True if the model should be routed to the local backend."""
-        return str(model or "").startswith("local/")
-
-    @property
-    def local_backend(self) -> LocalLLMBackend:
-        """Access the shared local backend instance."""
-        return _local_backend
-
-    def local_status(self) -> Dict[str, Any]:
-        """Return a dict with current local backend status."""
-        lb = _local_backend
-        return {
-            "enabled": lb.enabled,
-            "url": lb.base_url,
-            "default_model": lb.default_model,
-            "healthy": lb.is_healthy() if lb.enabled else False,
-            "prefer": os.environ.get("LOCAL_LLM_PREFER", "false").lower() == "true",
-        }
 
     def _get_client(self):
         if self._client is None:
@@ -349,50 +163,7 @@ class LLMClient:
         max_tokens: int = 16384,
         tool_choice: str = "auto",
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        """
-        Single LLM call. Routes to local backend if model starts with 'local/'.
-
-        Returns: (response_message_dict, usage_dict with cost).
-        For local models, cost is always 0.0.
-        """
-        # Route to local backend if requested
-        if self.is_local_model(model):
-            return self._chat_local(messages, model, tools, max_tokens)
-
-        # Otherwise use OpenRouter
-        return self._chat_openrouter(messages, model, tools, reasoning_effort, max_tokens, tool_choice)
-
-    def _chat_local(
-        self,
-        messages: List[Dict[str, Any]],
-        model: str,
-        tools: Optional[List[Dict[str, Any]]],
-        max_tokens: int,
-    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        """Route call to local LLM backend with fallback to cloud."""
-        lb = _local_backend
-        if not lb.enabled:
-            raise RuntimeError(
-                "Local LLM backend is disabled. Set LOCAL_LLM_ENABLED=true in environment."
-            )
-        if not lb.is_healthy():
-            raise RuntimeError(
-                f"Local LLM backend is not reachable at {lb.base_url}. "
-                "Check that LM Studio is running and the tunnel is active."
-            )
-        log.debug("Routing to local backend: model=%s url=%s", model, lb.base_url)
-        return lb.chat(messages=messages, model=model, tools=tools, max_tokens=max_tokens)
-
-    def _chat_openrouter(
-        self,
-        messages: List[Dict[str, Any]],
-        model: str,
-        tools: Optional[List[Dict[str, Any]]],
-        reasoning_effort: str,
-        max_tokens: int,
-        tool_choice: str,
-    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        """Send chat to OpenRouter."""
+        """Single LLM call. Returns: (response_message_dict, usage_dict with cost)."""
         client = self._get_client()
         effort = normalize_reasoning_effort(reasoning_effort)
 
@@ -438,6 +209,8 @@ class LLMClient:
                 usage["cached_tokens"] = int(prompt_details["cached_tokens"])
 
         # Extract cache_write_tokens from prompt_tokens_details if available
+        # OpenRouter: "cache_write_tokens"
+        # Native Anthropic: "cache_creation_tokens" or "cache_creation_input_tokens"
         if not usage.get("cache_write_tokens"):
             prompt_details_for_write = usage.get("prompt_tokens_details") or {}
             if isinstance(prompt_details_for_write, dict):
@@ -513,11 +286,7 @@ class LLMClient:
         return os.environ.get("OUROBOROS_MODEL", "anthropic/claude-sonnet-4.6")
 
     def available_models(self) -> List[str]:
-        """
-        Return list of available models (for switch_model tool schema).
-
-        Includes local model if LOCAL_LLM_ENABLED=true and backend is healthy.
-        """
+        """Return list of available models from env (for switch_model tool schema)."""
         main = os.environ.get("OUROBOROS_MODEL", "anthropic/claude-sonnet-4.6")
         code = os.environ.get("OUROBOROS_MODEL_CODE", "")
         light = os.environ.get("OUROBOROS_MODEL_LIGHT", "")
@@ -526,12 +295,205 @@ class LLMClient:
             models.append(code)
         if light and light != main and light != code:
             models.append(light)
-
-        # Add local model if backend is healthy
-        lb = _local_backend
-        if lb.enabled and lb.is_healthy():
-            local_model = f"local/{lb.default_model}"
-            if local_model not in models:
-                models.append(local_model)
-
         return models
+
+
+# ---------------------------------------------------------------------------
+# Local LLM Client (for LM Studio / OpenAI-compatible local APIs)
+# ---------------------------------------------------------------------------
+
+class LocalLLMClient(LLMClient):
+    """
+    OpenAI-compatible client for local LM Studio.
+
+    Differences from LLMClient:
+    - No OpenRouter-specific extra_body (no reasoning hints, no provider pinning)
+    - No cost tracking (local = free)
+    - No cache_control headers on tools (local APIs don't support it)
+    - Uses a dummy API key ("local")
+    """
+
+    def __init__(self, base_url: str = "http://localhost:1234/v1"):
+        # Use "local" as dummy key — LM Studio doesn't require auth
+        super().__init__(api_key="local", base_url=base_url)
+
+    def _get_client(self):
+        if self._client is None:
+            from openai import OpenAI
+            # No special headers needed for local API
+            self._client = OpenAI(
+                base_url=self._base_url,
+                api_key=self._api_key,
+            )
+        return self._client
+
+    def chat(
+        self,
+        messages: List[Dict[str, Any]],
+        model: str,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        reasoning_effort: str = "medium",
+        max_tokens: int = 4096,
+        tool_choice: str = "auto",
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """
+        Simple OpenAI-compatible chat call — no OpenRouter extensions.
+        Returns (message_dict, usage_dict). Cost is always 0 (local = free).
+        """
+        client = self._get_client()
+
+        kwargs: Dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+        }
+        # Local models may support tools, but without cache_control
+        if tools:
+            # Strip any cache_control from tools (local APIs don't support it)
+            clean_tools = []
+            for t in tools:
+                t_clean = {k: v for k, v in t.items() if k != "cache_control"}
+                clean_tools.append(t_clean)
+            kwargs["tools"] = clean_tools
+            kwargs["tool_choice"] = tool_choice
+
+        resp = client.chat.completions.create(**kwargs)
+        resp_dict = resp.model_dump()
+        usage = resp_dict.get("usage") or {}
+        choices = resp_dict.get("choices") or [{}]
+        msg = (choices[0] if choices else {}).get("message") or {}
+
+        # Local calls are free — ensure cost is 0
+        usage["cost"] = 0.0
+        usage["local"] = True
+
+        return msg, usage
+
+
+# ---------------------------------------------------------------------------
+# Local Model Router
+# ---------------------------------------------------------------------------
+
+# Tokens threshold above which we don't use local LLM (too slow / not capable)
+_LOCAL_MAX_CONTEXT_CHARS = 32_000  # ~8k tokens roughly
+
+# High-quality model keywords — never route these to local
+_HIGH_QUALITY_KEYWORDS = ("opus", "/o3", "/o4", "o3-pro", "gemini-2.5-pro", "gemini-3-pro")
+
+
+class LocalModelRouter:
+    """
+    Routes LLM calls between local LM Studio and OpenRouter.
+
+    Rules:
+    - If LOCAL_LLM_URL env var is not set → always use OpenRouter
+    - If local is unavailable (checked with TTL cache) → use OpenRouter
+    - If tools are present → use OpenRouter (tool calling needs capable models)
+    - If model is a high-quality model (opus, o3, o4) → use OpenRouter
+    - If context is large (>32k chars) → use OpenRouter
+    - Otherwise → use local LM Studio
+
+    Thread-safe. Health check cached for 30 seconds.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._available: Optional[bool] = None
+        self._last_check: float = 0.0
+        self._ttl: float = 30.0  # seconds
+        self._local_client: Optional[LocalLLMClient] = None
+
+    def _local_url(self) -> Optional[str]:
+        """Returns LOCAL_LLM_URL if set, else None (feature disabled)."""
+        return os.environ.get("LOCAL_LLM_URL", "").strip() or None
+
+    def _check_health(self) -> bool:
+        """Ping local API /models endpoint. Returns True if reachable."""
+        url = self._local_url()
+        if not url:
+            return False
+        try:
+            import requests
+            endpoint = url.rstrip("/") + "/models"
+            resp = requests.get(endpoint, timeout=2)
+            return resp.status_code == 200
+        except Exception:
+            return False
+
+    def is_available(self) -> bool:
+        """Check if local LLM is available (cached for TTL seconds)."""
+        if not self._local_url():
+            return False
+
+        now = time.monotonic()
+        with self._lock:
+            if self._available is not None and (now - self._last_check) < self._ttl:
+                return self._available
+            # Cache expired or first check
+            result = self._check_health()
+            self._available = result
+            self._last_check = now
+            if result:
+                log.info("Local LLM available at %s", self._local_url())
+            else:
+                log.debug("Local LLM not available at %s", self._local_url())
+            return result
+
+    def should_use_local(
+        self,
+        model: str,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> bool:
+        """
+        Decide whether to route this call to local LM Studio.
+
+        Returns True only if:
+        - Local is available
+        - No tools required (tool calling → OpenRouter)
+        - Model is not a high-quality/reasoning model
+        - Context is not too large
+        """
+        if not self.is_available():
+            return False
+
+        # Tools need capable models
+        if tools:
+            return False
+
+        # High-quality model explicitly requested
+        model_lower = model.lower()
+        if any(kw in model_lower for kw in _HIGH_QUALITY_KEYWORDS):
+            return False
+
+        # Estimate context size (rough char count across all messages)
+        total_chars = sum(
+            len(str(m.get("content") or ""))
+            for m in messages
+        )
+        if total_chars > _LOCAL_MAX_CONTEXT_CHARS:
+            return False
+
+        return True
+
+    def get_local_client(self) -> LocalLLMClient:
+        """Get (or create) the local LLM client."""
+        with self._lock:
+            if self._local_client is None:
+                url = self._local_url() or "http://localhost:1234/v1"
+                self._local_client = LocalLLMClient(base_url=url)
+            return self._local_client
+
+    def get_local_model(self) -> str:
+        """Return the local model name from env, default 'local'."""
+        return os.environ.get("LOCAL_LLM_MODEL", "local").strip() or "local"
+
+    def invalidate(self) -> None:
+        """Force re-check on next call (e.g., after SSH tunnel reconnect)."""
+        with self._lock:
+            self._available = None
+            self._last_check = 0.0
+
+
+# Module-level singleton — import this everywhere
+local_router = LocalModelRouter()
