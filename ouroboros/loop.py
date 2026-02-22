@@ -18,7 +18,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import logging
 
-from ouroboros.llm import LLMClient, LocalLLMBackend, normalize_reasoning_effort, add_usage
+from ouroboros.llm import LLMClient, LocalLLMBackend, normalize_reasoning_effort, add_usage, local_router as _local_router
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.context import compact_tool_history, compact_tool_history_llm
 from ouroboros.utils import utc_now_iso, append_jsonl, truncate_for_log, sanitize_tool_args_for_log, sanitize_tool_result_for_log, estimate_tokens
@@ -849,18 +849,47 @@ def _call_llm_with_retry(
     last_error: Optional[Exception] = None
     # Route to local backend if model starts with "local/"
     if model.startswith("local/"):
-        active_llm = LocalLLMBackend()
+        active_llm = _local_router.get_local_client()
+        # Strip "local/" prefix - the actual API only knows the bare model name
+        model_for_call = model[len("local/"):]
     else:
         active_llm = llm
+        model_for_call = model
 
     for attempt in range(max_retries):
         try:
-            kwargs = {"messages": messages, "model": model, "reasoning_effort": effort}
+            kwargs = {"messages": messages, "model": model_for_call, "reasoning_effort": effort}
             if tools:
                 kwargs["tools"] = tools
             resp_msg, usage = active_llm.chat(**kwargs)
             msg = resp_msg
             add_usage(accumulated_usage, usage)
+
+            # Capture reasoning_content from local thinking models (Qwen, DeepSeek, etc.)
+            reasoning_content = msg.get("reasoning_content") if msg else None
+            if reasoning_content and reasoning_content.strip():
+                log.debug("Local LLM reasoning (%d chars): %s...",
+                          len(reasoning_content), reasoning_content[:200])
+                append_jsonl(drive_logs / "events.jsonl", {
+                    "ts": utc_now_iso(), "type": "llm_reasoning",
+                    "task_id": task_id, "round": round_idx,
+                    "model": model,
+                    "reasoning_chars": len(reasoning_content),
+                    "reasoning_preview": reasoning_content[:500],
+                })
+                # Emit as progress so reasoning is visible in task log
+                if event_queue is not None:
+                    try:
+                        event_queue.put_nowait({
+                            "type": "progress", "task_id": task_id,
+                            "text": (
+                                "💭 [thinking] "
+                                + reasoning_content[:600]
+                                + ("..." if len(reasoning_content) > 600 else "")
+                            ),
+                        })
+                    except Exception:
+                        pass
 
             # Calculate cost and emit event for EVERY attempt (including retries)
             cost = float(usage.get("cost") or 0)

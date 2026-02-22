@@ -259,6 +259,13 @@ Full text: [BIBLE.md](BIBLE.md)
 
 ## Changelog
 
+### v6.3.1 -- Local LLM: reasoning_content capture + max_tokens fix
+- **reasoning_content capture**: LocalLLMClient extracts `reasoning_content` from thinking-model responses (Qwen, DeepSeek), logs reasoning token count, emits 💭 progress message, and records to events.jsonl.
+- **max_tokens default raised**: 4096 → 8192 for LocalLLMClient — ensures thinking models finish their reasoning chain before emitting answer.
+- **LocalLLMBackend alias**: Added alias `LocalLLMBackend = LocalLLMClient` for loop.py import compatibility.
+- **local/ prefix stripping**: `_call_llm_with_retry` now strips `local/` prefix before passing model name to the actual API.
+- **Reasoning preview in events.jsonl**: type=`llm_reasoning` event with first 500 chars of reasoning chain.
+
 ### v6.3.0 -- Local LLM (LM Studio) Integration
 - **LocalLLMBackend**: New backend wrapping OpenAI-compatible local API.
 - **local/ prefix routing**: Any model starting with `local/` routes to `LOCAL_LLM_BASE_URL`.

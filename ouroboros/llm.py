@@ -333,7 +333,7 @@ class LocalLLMClient(LLMClient):
         model: str,
         tools: Optional[List[Dict[str, Any]]] = None,
         reasoning_effort: str = "medium",
-        max_tokens: int = 4096,
+        max_tokens: int = 8192,
         tool_choice: str = "auto",
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """
@@ -362,6 +362,20 @@ class LocalLLMClient(LLMClient):
         usage = resp_dict.get("usage") or {}
         choices = resp_dict.get("choices") or [{}]
         msg = (choices[0] if choices else {}).get("message") or {}
+
+        # Capture reasoning_content from thinking models (Qwen, DeepSeek, etc.).
+        # llama.cpp/LM Studio return it as a top-level key on the message object.
+        # model_dump() already includes it if present — just ensure it stays in msg.
+        reasoning = msg.get("reasoning_content") or ""
+        if reasoning:
+            log.debug("Local LLM reasoning (%d chars)", len(reasoning))
+            # Expose reasoning token count in usage for monitoring
+            usage["reasoning_tokens"] = len(reasoning.split())
+
+        # Also check completion_tokens_details for native reasoning_tokens field
+        ctd = usage.get("completion_tokens_details") or {}
+        if isinstance(ctd, dict) and ctd.get("reasoning_tokens"):
+            usage["reasoning_tokens"] = ctd["reasoning_tokens"]
 
         # Local calls are free — ensure cost is 0
         usage["cost"] = 0.0
@@ -494,6 +508,9 @@ class LocalModelRouter:
             self._available = None
             self._last_check = 0.0
 
+
+# Alias for backward compatibility (loop.py imports this name)
+LocalLLMBackend = LocalLLMClient
 
 # Module-level singleton — import this everywhere
 local_router = LocalModelRouter()
