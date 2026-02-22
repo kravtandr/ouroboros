@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import uuid
+import requests
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -165,11 +166,9 @@ def _switch_model(ctx: ToolContext, model: str = "", effort: str = "") -> str:
     (prefix 'local/' — routed to LM Studio via LOCAL_LLM_URL env var).
     Stored in ToolContext, applied on the next LLM call in the loop.
     """
-    from ouroboros.llm import LLMClient, normalize_reasoning_effort, LocalLLMBackend
+    from ouroboros.llm import LLMClient, normalize_reasoning_effort
 
-    # Use the same environment check as LocalLLMBackend/LocalModelRouter
-    # We don't import LocalModelRouter directly to avoid circular imports if possible,
-    # but we can check the env var.
+    # Check local config safely
     local_url = os.environ.get("LOCAL_LLM_URL") or os.environ.get("LOCAL_LLM_BASE_URL")
     
     changes = []
@@ -182,9 +181,7 @@ def _switch_model(ctx: ToolContext, model: str = "", effort: str = "") -> str:
                     "⚠️ LOCAL_LLM_URL is not set. Set it to your LM Studio URL "
                     "(e.g. http://host:1234) to use local models."
                 )
-            
-            # We assume if the URL is set, we can try to use it.
-            # Stricter checks happen in the loop or llm.py if it fails.
+            # Use it blindly if configured — loop will handle connection errors
             ctx.active_model_override = model
             changes.append(f"model={model} (local)")
         else:
@@ -220,22 +217,21 @@ def _local_llm_status(ctx: ToolContext) -> str:
 
     Returns health, available models, and configuration details.
     """
-    # We try to use the router logic if we can import it, or just manual check
+    # Try importing router, fallback to manual check if it fails/circular
     try:
         from ouroboros.llm import local_router
+        # Force a check
+        local_router.invalidate()
         available = local_router.is_available()
-        url = local_router._local_url()
+        url = local_router._local_url() if hasattr(local_router, "_local_url") else None
     except ImportError:
-        # Fallback if local_router not available (e.g. old code version loaded)
         url = os.environ.get("LOCAL_LLM_URL") or os.environ.get("LOCAL_LLM_BASE_URL")
         available = False
         if url:
-             # Basic ping
-             import requests
              try:
                  resp = requests.get(url.rstrip("/") + "/models", timeout=2)
                  available = (resp.status_code == 200)
-             except:
+             except Exception:
                  available = False
 
     if not url:
@@ -342,8 +338,8 @@ def get_tools() -> List[ToolEntry]:
             "name": "send_owner_message",
             "description": "Send a proactive message to the owner. Use when you have something genuinely worth saying — an insight, a question, or an invitation to collaborate. This is NOT for task responses (those go automatically).",
             "parameters": {"type": "object", "properties": {
-                "text": {"type": "string", "description": "Message text"},
                 "reason": {"type": "string", "description": "Why you're reaching out (logged, not sent)"},
+                "text": {"type": "string", "description": "Message text"},
             }, "required": ["text"]},
         }, _send_owner_message),
         ToolEntry("update_identity", {
@@ -361,11 +357,6 @@ def get_tools() -> List[ToolEntry]:
                 "effort": {"type": "string", "description": "Reasoning effort level. Leave empty to keep current.", "enum": ["low", "medium", "high", "xhigh"]},
             }, "required": []},
         }, _switch_model),
-        ToolEntry("local_llm_status", {
-            "name": "local_llm_status",
-            "description": "Check status of the local LLM backend (LM Studio). Returns URL, health, and available models.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        }, _local_llm_status),
         ToolEntry("get_task_result", {
             "name": "get_task_result",
             "description": "Read the result of a completed subtask. Use after schedule_task to collect results.",
@@ -376,14 +367,14 @@ def get_tools() -> List[ToolEntry]:
             "description": "Check if a subtask has completed. Returns result if done, or 'still running' message. Call repeatedly to poll. Default timeout: 120s.",
             "parameters": {"type": "object", "properties": {"task_id": {"type": "string", "description": "Task ID to check"}}, "required": ["task_id"]},
         }, _wait_for_task),
-        ToolEntry("toggle_evolution", {
-            "name": "toggle_evolution",
-            "description": "Enable/disable evolution mode.",
-            "parameters": {"type": "object", "properties": {"enabled": {"type": "boolean"}}, "required": ["enabled"]},
-        }, _toggle_evolution),
-        ToolEntry("toggle_consciousness", {
-            "name": "toggle_consciousness",
-            "description": "Control background consciousness loop.",
-            "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": ["start", "stop", "status"]}}, "required": ["action"]},
-        }, _toggle_consciousness),
+        ToolEntry("list_available_tools", {
+            "name": "list_available_tools",
+            "description": "List all additional tools not currently in your active tool set. Returns name + description for each. Use this to discover tools you might need for specific tasks.",
+            "parameters": {"type": "object"},
+        }, lambda ctx: "\n".join([f"- {t.name}: {t.schema['description']}" for t in ctx.registry.list_tools() if t.name not in ctx.active_tool_names])),
+        ToolEntry("enable_tools", {
+            "name": "enable_tools",
+            "description": "Enable specific additional tools by name (comma-separated). Their schemas will be added to your active tool set for the remainder of this task. Example: enable_tools(tools='multi_model_review,generate_evolution_stats')",
+            "parameters": {"type": "object", "properties": {"tools": {"type": "string", "description": "Comma-separated tool names to enable"}}, "required": ["tools"]},
+        }, lambda ctx, tools: ctx.enable_tools(tools)),
     ]
