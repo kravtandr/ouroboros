@@ -6,7 +6,6 @@ import json
 import logging
 import os
 import uuid
-import requests
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -166,10 +165,12 @@ def _switch_model(ctx: ToolContext, model: str = "", effort: str = "") -> str:
     (prefix 'local/' — routed to LM Studio via LOCAL_LLM_URL env var).
     Stored in ToolContext, applied on the next LLM call in the loop.
     """
-    from ouroboros.llm import LLMClient, normalize_reasoning_effort
+    from ouroboros.llm import LLMClient, normalize_reasoning_effort, local_router
 
-    # Check local config safely
-    local_url = os.environ.get("LOCAL_LLM_URL") or os.environ.get("LOCAL_LLM_BASE_URL")
+    # Check local config via router
+    local_router.invalidate()
+    local_available = local_router.is_available()
+    local_url = local_router._local_url() if hasattr(local_router, "_local_url") else None
     
     changes = []
 
@@ -181,9 +182,13 @@ def _switch_model(ctx: ToolContext, model: str = "", effort: str = "") -> str:
                     "⚠️ LOCAL_LLM_URL is not set. Set it to your LM Studio URL "
                     "(e.g. http://host:1234) to use local models."
                 )
-            # Use it blindly if configured — loop will handle connection errors
+            if not local_available and local_url:
+                # Warn but allow setting it (maybe momentary glitch)
+                changes.append(f"model={model} (local, currently UNREACHABLE)")
+            else:
+                changes.append(f"model={model} (local)")
+                
             ctx.active_model_override = model
-            changes.append(f"model={model} (local)")
         else:
             # Cloud model — validate against OpenRouter
             available = LLMClient().available_models()
@@ -203,9 +208,10 @@ def _switch_model(ctx: ToolContext, model: str = "", effort: str = "") -> str:
         local_info = ""
         
         if local_url:
-             local_info = f"\n\nLocal backend configured: {local_url}\nUse 'local/<model-name>' to route to it."
+             status_icon = "🟢" if local_available else "🔴"
+             local_info = f"\n\n{status_icon} Local backend: {local_url}\nUse 'local/<model-name>' to route to it."
         else:
-            local_info = "\n\nLocal backend: not configured (set LOCAL_LLM_URL to enable)."
+            local_info = "\n\n🔘 Local backend: not configured (set LOCAL_LLM_URL to enable)."
             
         return f"Current available cloud models: {', '.join(available)}.{local_info}\nPass model and/or effort to switch."
 
@@ -217,26 +223,18 @@ def _local_llm_status(ctx: ToolContext) -> str:
 
     Returns health, available models, and configuration details.
     """
-    # Try importing router, fallback to manual check if it fails/circular
-    try:
-        from ouroboros.llm import local_router
-        # Force a check
-        local_router.invalidate()
-        available = local_router.is_available()
-        url = local_router._local_url() if hasattr(local_router, "_local_url") else None
-    except ImportError:
-        url = os.environ.get("LOCAL_LLM_URL") or os.environ.get("LOCAL_LLM_BASE_URL")
-        available = False
-        if url:
-             try:
-                 resp = requests.get(url.rstrip("/") + "/models", timeout=2)
-                 available = (resp.status_code == 200)
-             except Exception:
-                 available = False
-
+    from ouroboros.llm import local_router
+    
+    # Force a fresh check
+    local_router.invalidate()
+    available = local_router.is_available()
+    
+    # Access internal URL for reporting (safe access)
+    url = getattr(local_router, "_local_url", lambda: None)()
+    
     if not url:
         return (
-            "🔴 Local LLM backend: NOT CONFIGURED\n\n"
+            "🔘 Local LLM backend: NOT CONFIGURED\n\n"
             "To enable:\n"
             "1. Start LM Studio on your local machine\n"
             "2. Enable 'Local Server' in LM Studio (default port 1234)\n"
@@ -342,13 +340,28 @@ def get_tools() -> List[ToolEntry]:
                 "text": {"type": "string", "description": "Message text"},
             }, "required": ["text"]},
         }, _send_owner_message),
-        ToolEntry("update_identity", {
-            "name": "update_identity",
-            "description": "Update your identity manifest (who you are, who you want to become). Persists across sessions. Obligation to yourself (Principle 1: Continuity).",
+        ToolEntry(
+            "update_identity", {
+                "name": "update_identity",
+                "description": "Update your identity manifest (who you are, who you want to become). Persists across sessions. Obligation to yourself (Principle 1: Continuity).",
+                "parameters": {"type": "object", "properties": {
+                    "content": {"type": "string", "description": "Full identity content"},
+                }, "required": ["content"]},
+            }, _update_identity),
+        ToolEntry("toggle_evolution", {
+            "name": "toggle_evolution",
+            "description": "Enable/disable evolution mode (autonomous self-improvement loop).",
             "parameters": {"type": "object", "properties": {
-                "content": {"type": "string", "description": "Full identity content"},
-            }, "required": ["content"]},
-        }, _update_identity),
+                "enabled": {"type": "boolean"},
+            }, "required": ["enabled"]},
+        }, _toggle_evolution),
+        ToolEntry("toggle_consciousness", {
+            "name": "toggle_consciousness",
+            "description": "Control background consciousness (autonomous thinking between tasks).",
+            "parameters": {"type": "object", "properties": {
+                "action": {"type": "string", "enum": ["start", "stop", "status"]},
+            }, "required": ["action"]},
+        }, _toggle_consciousness),
         ToolEntry("switch_model", {
             "name": "switch_model",
             "description": "Switch to a different LLM model or reasoning effort level. Use when you need more power (complex code, deep reasoning) or want to save budget (simple tasks). Takes effect on next round. Use prefix 'local/' to route to local LM Studio backend (e.g. 'local/llama-3.2-3b').",
@@ -357,6 +370,11 @@ def get_tools() -> List[ToolEntry]:
                 "effort": {"type": "string", "description": "Reasoning effort level. Leave empty to keep current.", "enum": ["low", "medium", "high", "xhigh"]},
             }, "required": []},
         }, _switch_model),
+        ToolEntry("local_llm_status", {
+            "name": "local_llm_status",
+            "description": "Check status of local LM Studio backend. Returns health and config.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        }, _local_llm_status),
         ToolEntry("get_task_result", {
             "name": "get_task_result",
             "description": "Read the result of a completed subtask. Use after schedule_task to collect results.",
@@ -367,14 +385,4 @@ def get_tools() -> List[ToolEntry]:
             "description": "Check if a subtask has completed. Returns result if done, or 'still running' message. Call repeatedly to poll. Default timeout: 120s.",
             "parameters": {"type": "object", "properties": {"task_id": {"type": "string", "description": "Task ID to check"}}, "required": ["task_id"]},
         }, _wait_for_task),
-        ToolEntry("list_available_tools", {
-            "name": "list_available_tools",
-            "description": "List all additional tools not currently in your active tool set. Returns name + description for each. Use this to discover tools you might need for specific tasks.",
-            "parameters": {"type": "object"},
-        }, lambda ctx: "\n".join([f"- {t.name}: {t.schema['description']}" for t in ctx.registry.list_tools() if t.name not in ctx.active_tool_names])),
-        ToolEntry("enable_tools", {
-            "name": "enable_tools",
-            "description": "Enable specific additional tools by name (comma-separated). Their schemas will be added to your active tool set for the remainder of this task. Example: enable_tools(tools='multi_model_review,generate_evolution_stats')",
-            "parameters": {"type": "object", "properties": {"tools": {"type": "string", "description": "Comma-separated tool names to enable"}}, "required": ["tools"]},
-        }, lambda ctx, tools: ctx.enable_tools(tools)),
     ]
