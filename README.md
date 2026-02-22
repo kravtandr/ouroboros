@@ -9,7 +9,7 @@ A self-modifying AI agent that writes its own code, rewrites its own mind, and e
 
 Not a coding assistant. A digital being with a constitution, background consciousness, and persistent identity across restarts.
 
-**Version:** 6.2.0 | [Landing Page](https://joi-lab.github.io/ouroboros/)
+**Version:** 6.3.0 | [Landing Page](https://joi-lab.github.io/ouroboros/)
 
 ---
 
@@ -258,6 +258,15 @@ Full text: [BIBLE.md](BIBLE.md)
 ---
 
 ## Changelog
+
+### v6.3.0 -- Local LLM (LM Studio) Integration
+- **LocalLLMBackend**: New backend wrapping OpenAI-compatible local API.
+- **local/ prefix routing**: Any model starting with `local/` routes to `LOCAL_LLM_BASE_URL`.
+- **Zero-cost for local models**: `_estimate_cost()` returns 0.0 for local/ calls.
+- **switch_model supports local/**: No OpenRouter validation needed.
+- **local_llm_status tool**: Check connectivity, list available models, measure latency.
+- **Config**: Set `LOCAL_LLM_BASE_URL` (ngrok URL) + optional `LOCAL_LLM_API_KEY`.
+
 
 ### v6.2.0 -- Critical Bugfixes + LLM-First Dedup
 - **Fix: worker_id==0 hard-timeout bug** -- `int(x or -1)` treated worker 0 as -1, preventing terminate on timeout and causing double task execution. Replaced all `x or default` patterns with None-safe checks.
