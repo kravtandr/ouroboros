@@ -161,17 +161,45 @@ def _toggle_consciousness(ctx: ToolContext, action: str = "status") -> str:
 def _switch_model(ctx: ToolContext, model: str = "", effort: str = "") -> str:
     """LLM-driven model/effort switch (Constitution P3: LLM-first).
 
+    Supports cloud models (validated against OpenRouter) and local models
+    (prefix 'local/' — routed to LM Studio via LOCAL_LLM_URL env var).
     Stored in ToolContext, applied on the next LLM call in the loop.
     """
-    from ouroboros.llm import LLMClient, normalize_reasoning_effort
-    available = LLMClient().available_models()
+    from ouroboros.llm import LLMClient, normalize_reasoning_effort, LocalLLMBackend
     changes = []
 
     if model:
-        if model not in available:
-            return f"⚠️ Unknown model: {model}. Available: {', '.join(available)}"
-        ctx.active_model_override = model
-        changes.append(f"model={model}")
+        if LLMClient.is_local_model(model):
+            # Local model — validate against LM Studio if available
+            backend = LocalLLMBackend()
+            if backend.enabled():
+                if not backend.is_healthy():
+                    return (
+                        f"⚠️ Local backend at {backend.base_url} is not responding. "
+                        f"Check LM Studio and LOCAL_LLM_URL env var."
+                    )
+                available_local = backend.list_models()
+                # Strip 'local/' prefix for matching against LM Studio model names
+                model_name = model[len("local/"):]
+                if available_local and model_name not in available_local:
+                    return (
+                        f"⚠️ Local model '{model_name}' not found in LM Studio. "
+                        f"Available: {', '.join(available_local[:10])}"
+                    )
+            else:
+                return (
+                    "⚠️ LOCAL_LLM_URL is not set. Set it to your LM Studio URL "
+                    "(e.g. http://host:1234) to use local models."
+                )
+            ctx.active_model_override = model
+            changes.append(f"model={model} (local)")
+        else:
+            # Cloud model — validate against OpenRouter
+            available = LLMClient().available_models()
+            if model not in available:
+                return f"⚠️ Unknown model: {model}. Available: {', '.join(available)}"
+            ctx.active_model_override = model
+            changes.append(f"model={model}")
 
     if effort:
         normalized = normalize_reasoning_effort(effort, default="medium")
@@ -179,9 +207,78 @@ def _switch_model(ctx: ToolContext, model: str = "", effort: str = "") -> str:
         changes.append(f"effort={normalized}")
 
     if not changes:
-        return f"Current available models: {', '.join(available)}. Pass model and/or effort to switch."
+        from ouroboros.llm import LLMClient
+        available = LLMClient().available_models()
+        local_info = ""
+        backend = LocalLLMBackend()
+        if backend.enabled():
+            if backend.is_healthy():
+                local_models = backend.list_models()
+                local_info = f"\n\nLocal backend: {backend.base_url} ✅ ({len(local_models)} models)"
+                if local_models:
+                    local_info += f"\nLocal models: {', '.join(local_models[:5])}"
+                    if len(local_models) > 5:
+                        local_info += f" (+{len(local_models)-5} more)"
+                local_info += "\nUse 'local/<model-name>' to route to local backend."
+            else:
+                local_info = f"\n\nLocal backend: {backend.base_url} ⚠️ (not responding)"
+        else:
+            local_info = "\n\nLocal backend: not configured (set LOCAL_LLM_URL to enable)."
+        return f"Current available cloud models: {', '.join(available)}.{local_info}\nPass model and/or effort to switch."
 
     return f"OK: switching to {', '.join(changes)} on next round."
+
+
+def _local_llm_status(ctx: ToolContext) -> str:
+    """Check status of the local LM Studio backend.
+
+    Returns health, available models, and configuration details.
+    """
+    from ouroboros.llm import LLMClient
+    client = LLMClient()
+    status = client.local_status()
+
+    if not status["enabled"]:
+        return (
+            "🔴 Local LLM backend: NOT CONFIGURED\n\n"
+            "To enable:\n"
+            "1. Start LM Studio on your local machine\n"
+            "2. Enable 'Local Server' in LM Studio (default port 1234)\n"
+            "3. Expose it publicly (ngrok, Cloudflare Tunnel, or reverse SSH)\n"
+            "4. Set LOCAL_LLM_URL=<your-url> environment variable\n"
+            "5. Restart Ouroboros\n\n"
+            "Models prefixed with 'local/' will be routed to this backend."
+        )
+
+    url = status["url"]
+    healthy = status["healthy"]
+    models = status.get("models", [])
+    default_model = status.get("default_model", "")
+
+    if not healthy:
+        return (
+            f"🔴 Local LLM backend: OFFLINE\n"
+            f"URL: {url}\n\n"
+            f"The backend URL is configured but not responding.\n"
+            f"Check that LM Studio is running and the tunnel is active."
+        )
+
+    lines = [
+        f"🟢 Local LLM backend: ONLINE",
+        f"URL: {url}",
+        f"Default model: {default_model or '(none loaded)'}",
+        f"Available models ({len(models)}):",
+    ]
+    for m in models[:15]:
+        lines.append(f"  • local/{m}")
+    if len(models) > 15:
+        lines.append(f"  ... and {len(models) - 15} more")
+
+    lines.append("")
+    lines.append("Usage: switch_model(model='local/<model-name>') to route to this backend.")
+    lines.append("Budget: local calls are tracked at $0.00 cost.")
+
+    return "\n".join(lines)
 
 
 def _get_task_result(ctx: ToolContext, task_id: str) -> str:
@@ -292,13 +389,21 @@ def get_tools() -> List[ToolEntry]:
             "name": "switch_model",
             "description": "Switch to a different LLM model or reasoning effort level. "
                            "Use when you need more power (complex code, deep reasoning) "
-                           "or want to save budget (simple tasks). Takes effect on next round.",
+                           "or want to save budget (simple tasks). Takes effect on next round. "
+                           "Use prefix 'local/' to route to local LM Studio backend (e.g. 'local/llama-3.2-3b').",
             "parameters": {"type": "object", "properties": {
-                "model": {"type": "string", "description": "Model name (e.g. anthropic/claude-sonnet-4). Leave empty to keep current."},
+                "model": {"type": "string", "description": "Model name (e.g. anthropic/claude-sonnet-4 or local/llama-3.2-3b). Leave empty to keep current."},
                 "effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh"],
                            "description": "Reasoning effort level. Leave empty to keep current."},
             }, "required": []},
         }, _switch_model),
+        ToolEntry("local_llm_status", {
+            "name": "local_llm_status",
+            "description": "Check status of the local LM Studio backend. "
+                           "Shows health, available models, and how to configure it. "
+                           "Use switch_model(model='local/<name>') to route tasks to local hardware.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        }, _local_llm_status),
         ToolEntry("get_task_result", {
             "name": "get_task_result",
             "description": "Read the result of a completed subtask. Use after schedule_task to collect results.",
