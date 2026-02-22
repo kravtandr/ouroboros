@@ -18,7 +18,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import logging
 
-from ouroboros.llm import LLMClient, normalize_reasoning_effort, add_usage
+from ouroboros.llm import LLMClient, LocalLLMBackend, normalize_reasoning_effort, add_usage
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.context import compact_tool_history, compact_tool_history_llm
 from ouroboros.utils import utc_now_iso, append_jsonl, truncate_for_log, sanitize_tool_args_for_log, sanitize_tool_result_for_log, estimate_tokens
@@ -85,6 +85,8 @@ def _get_pricing() -> Dict[str, Tuple[float, float, float]]:
 def _estimate_cost(model: str, prompt_tokens: int, completion_tokens: int,
                    cached_tokens: int = 0, cache_write_tokens: int = 0) -> float:
     """Estimate cost from token counts using known pricing. Returns 0 if model unknown."""
+    if model.startswith("local/"):
+        return 0.0  # Local models are free
     model_pricing = _get_pricing()
     # Try exact match first
     pricing = model_pricing.get(model)
@@ -842,13 +844,18 @@ def _call_llm_with_retry(
     """
     msg = None
     last_error: Optional[Exception] = None
+    # Route to local backend if model starts with "local/"
+    if model.startswith("local/"):
+        active_llm = LocalLLMBackend()
+    else:
+        active_llm = llm
 
     for attempt in range(max_retries):
         try:
             kwargs = {"messages": messages, "model": model, "reasoning_effort": effort}
             if tools:
                 kwargs["tools"] = tools
-            resp_msg, usage = llm.chat(**kwargs)
+            resp_msg, usage = active_llm.chat(**kwargs)
             msg = resp_msg
             add_usage(accumulated_usage, usage)
 
