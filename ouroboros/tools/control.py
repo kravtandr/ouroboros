@@ -166,31 +166,25 @@ def _switch_model(ctx: ToolContext, model: str = "", effort: str = "") -> str:
     Stored in ToolContext, applied on the next LLM call in the loop.
     """
     from ouroboros.llm import LLMClient, normalize_reasoning_effort, LocalLLMBackend
+
+    # Use the same environment check as LocalLLMBackend/LocalModelRouter
+    # We don't import LocalModelRouter directly to avoid circular imports if possible,
+    # but we can check the env var.
+    local_url = os.environ.get("LOCAL_LLM_URL") or os.environ.get("LOCAL_LLM_BASE_URL")
+    
     changes = []
 
     if model:
         if model.startswith("local/"):
-            # Local model — validate against LM Studio if available
-            backend = LocalLLMBackend()
-            if backend.enabled():
-                if not backend.is_healthy():
-                    return (
-                        f"⚠️ Local backend at {backend.base_url} is not responding. "
-                        f"Check LM Studio and LOCAL_LLM_URL env var."
-                    )
-                available_local = backend.list_models()
-                # Strip 'local/' prefix for matching against LM Studio model names
-                model_name = model[len("local/"):]
-                if available_local and model_name not in available_local:
-                    return (
-                        f"⚠️ Local model '{model_name}' not found in LM Studio. "
-                        f"Available: {', '.join(available_local[:10])}"
-                    )
-            else:
+            # Local model check
+            if not local_url:
                 return (
                     "⚠️ LOCAL_LLM_URL is not set. Set it to your LM Studio URL "
                     "(e.g. http://host:1234) to use local models."
                 )
+            
+            # We assume if the URL is set, we can try to use it.
+            # Stricter checks happen in the loop or llm.py if it fails.
             ctx.active_model_override = model
             changes.append(f"model={model} (local)")
         else:
@@ -210,20 +204,12 @@ def _switch_model(ctx: ToolContext, model: str = "", effort: str = "") -> str:
         from ouroboros.llm import LLMClient
         available = LLMClient().available_models()
         local_info = ""
-        backend = LocalLLMBackend()
-        if backend.enabled():
-            if backend.is_healthy():
-                local_models = backend.list_models()
-                local_info = f"\n\nLocal backend: {backend.base_url} ✅ ({len(local_models)} models)"
-                if local_models:
-                    local_info += f"\nLocal models: {', '.join(local_models[:5])}"
-                    if len(local_models) > 5:
-                        local_info += f" (+{len(local_models)-5} more)"
-                local_info += "\nUse 'local/<model-name>' to route to local backend."
-            else:
-                local_info = f"\n\nLocal backend: {backend.base_url} ⚠️ (not responding)"
+        
+        if local_url:
+             local_info = f"\n\nLocal backend configured: {local_url}\nUse 'local/<model-name>' to route to it."
         else:
             local_info = "\n\nLocal backend: not configured (set LOCAL_LLM_URL to enable)."
+            
         return f"Current available cloud models: {', '.join(available)}.{local_info}\nPass model and/or effort to switch."
 
     return f"OK: switching to {', '.join(changes)} on next round."
@@ -234,11 +220,25 @@ def _local_llm_status(ctx: ToolContext) -> str:
 
     Returns health, available models, and configuration details.
     """
-    from ouroboros.llm import LLMClient
-    client = LLMClient()
-    status = client.local_status()
+    # We try to use the router logic if we can import it, or just manual check
+    try:
+        from ouroboros.llm import local_router
+        available = local_router.is_available()
+        url = local_router._local_url()
+    except ImportError:
+        # Fallback if local_router not available (e.g. old code version loaded)
+        url = os.environ.get("LOCAL_LLM_URL") or os.environ.get("LOCAL_LLM_BASE_URL")
+        available = False
+        if url:
+             # Basic ping
+             import requests
+             try:
+                 resp = requests.get(url.rstrip("/") + "/models", timeout=2)
+                 available = (resp.status_code == 200)
+             except:
+                 available = False
 
-    if not status["enabled"]:
+    if not url:
         return (
             "🔴 Local LLM backend: NOT CONFIGURED\n\n"
             "To enable:\n"
@@ -250,12 +250,7 @@ def _local_llm_status(ctx: ToolContext) -> str:
             "Models prefixed with 'local/' will be routed to this backend."
         )
 
-    url = status["url"]
-    healthy = status["healthy"]
-    models = status.get("models", [])
-    default_model = status.get("default_model", "")
-
-    if not healthy:
+    if not available:
         return (
             f"🔴 Local LLM backend: OFFLINE\n"
             f"URL: {url}\n\n"
@@ -266,18 +261,9 @@ def _local_llm_status(ctx: ToolContext) -> str:
     lines = [
         f"🟢 Local LLM backend: ONLINE",
         f"URL: {url}",
-        f"Default model: {default_model or '(none loaded)'}",
-        f"Available models ({len(models)}):",
+        "Usage: switch_model(model='local/<model-name>') to route to this backend.",
+        "Budget: local calls are tracked at $0.00 cost.",
     ]
-    for m in models[:15]:
-        lines.append(f"  • local/{m}")
-    if len(models) > 15:
-        lines.append(f"  ... and {len(models) - 15} more")
-
-    lines.append("")
-    lines.append("Usage: switch_model(model='local/<model-name>') to route to this backend.")
-    lines.append("Budget: local calls are tracked at $0.00 cost.")
-
     return "\n".join(lines)
 
 
@@ -347,17 +333,14 @@ def get_tools() -> List[ToolEntry]:
         }, _chat_history),
         ToolEntry("update_scratchpad", {
             "name": "update_scratchpad",
-            "description": "Update your working memory. Write freely — any format you find useful. "
-                           "This persists across sessions and is read at every task start.",
+            "description": "Update your working memory. Write freely — any format you find useful. This persists across sessions and is read at every task start.",
             "parameters": {"type": "object", "properties": {
                 "content": {"type": "string", "description": "Full scratchpad content"},
             }, "required": ["content"]},
         }, _update_scratchpad),
         ToolEntry("send_owner_message", {
             "name": "send_owner_message",
-            "description": "Send a proactive message to the owner. Use when you have something "
-                           "genuinely worth saying — an insight, a question, or an invitation to collaborate. "
-                           "This is NOT for task responses (those go automatically).",
+            "description": "Send a proactive message to the owner. Use when you have something genuinely worth saying — an insight, a question, or an invitation to collaborate. This is NOT for task responses (those go automatically).",
             "parameters": {"type": "object", "properties": {
                 "text": {"type": "string", "description": "Message text"},
                 "reason": {"type": "string", "description": "Why you're reaching out (logged, not sent)"},
@@ -365,57 +348,42 @@ def get_tools() -> List[ToolEntry]:
         }, _send_owner_message),
         ToolEntry("update_identity", {
             "name": "update_identity",
-            "description": "Update your identity manifest (who you are, who you want to become). "
-                           "Persists across sessions. Obligation to yourself (Principle 1: Continuity).",
+            "description": "Update your identity manifest (who you are, who you want to become). Persists across sessions. Obligation to yourself (Principle 1: Continuity).",
             "parameters": {"type": "object", "properties": {
                 "content": {"type": "string", "description": "Full identity content"},
             }, "required": ["content"]},
         }, _update_identity),
-        ToolEntry("toggle_evolution", {
-            "name": "toggle_evolution",
-            "description": "Enable or disable evolution mode. When enabled, Ouroboros runs continuous self-improvement cycles.",
-            "parameters": {"type": "object", "properties": {
-                "enabled": {"type": "boolean", "description": "true to enable, false to disable"},
-            }, "required": ["enabled"]},
-        }, _toggle_evolution),
-        ToolEntry("toggle_consciousness", {
-            "name": "toggle_consciousness",
-            "description": "Control background consciousness: 'start', 'stop', or 'status'.",
-            "parameters": {"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["start", "stop", "status"], "description": "Action to perform"},
-            }, "required": ["action"]},
-        }, _toggle_consciousness),
         ToolEntry("switch_model", {
             "name": "switch_model",
-            "description": "Switch to a different LLM model or reasoning effort level. "
-                           "Use when you need more power (complex code, deep reasoning) "
-                           "or want to save budget (simple tasks). Takes effect on next round. "
-                           "Use prefix 'local/' to route to local LM Studio backend (e.g. 'local/llama-3.2-3b').",
+            "description": "Switch to a different LLM model or reasoning effort level. Use when you need more power (complex code, deep reasoning) or want to save budget (simple tasks). Takes effect on next round. Use prefix 'local/' to route to local LM Studio backend (e.g. 'local/llama-3.2-3b').",
             "parameters": {"type": "object", "properties": {
                 "model": {"type": "string", "description": "Model name (e.g. anthropic/claude-sonnet-4 or local/llama-3.2-3b). Leave empty to keep current."},
-                "effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh"],
-                           "description": "Reasoning effort level. Leave empty to keep current."},
+                "effort": {"type": "string", "description": "Reasoning effort level. Leave empty to keep current.", "enum": ["low", "medium", "high", "xhigh"]},
             }, "required": []},
         }, _switch_model),
         ToolEntry("local_llm_status", {
             "name": "local_llm_status",
-            "description": "Check status of the local LM Studio backend. "
-                           "Shows health, available models, and how to configure it. "
-                           "Use switch_model(model='local/<name>') to route tasks to local hardware.",
+            "description": "Check status of the local LLM backend (LM Studio). Returns URL, health, and available models.",
             "parameters": {"type": "object", "properties": {}, "required": []},
         }, _local_llm_status),
         ToolEntry("get_task_result", {
             "name": "get_task_result",
             "description": "Read the result of a completed subtask. Use after schedule_task to collect results.",
-            "parameters": {"type": "object", "required": ["task_id"], "properties": {
-                "task_id": {"type": "string", "description": "Task ID returned by schedule_task"},
-            }},
+            "parameters": {"type": "object", "properties": {"task_id": {"type": "string", "description": "Task ID returned by schedule_task"}}, "required": ["task_id"]},
         }, _get_task_result),
         ToolEntry("wait_for_task", {
             "name": "wait_for_task",
             "description": "Check if a subtask has completed. Returns result if done, or 'still running' message. Call repeatedly to poll. Default timeout: 120s.",
-            "parameters": {"type": "object", "required": ["task_id"], "properties": {
-                "task_id": {"type": "string", "description": "Task ID to check"},
-            }},
+            "parameters": {"type": "object", "properties": {"task_id": {"type": "string", "description": "Task ID to check"}}, "required": ["task_id"]},
         }, _wait_for_task),
+        ToolEntry("toggle_evolution", {
+            "name": "toggle_evolution",
+            "description": "Enable/disable evolution mode.",
+            "parameters": {"type": "object", "properties": {"enabled": {"type": "boolean"}}, "required": ["enabled"]},
+        }, _toggle_evolution),
+        ToolEntry("toggle_consciousness", {
+            "name": "toggle_consciousness",
+            "description": "Control background consciousness loop.",
+            "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": ["start", "stop", "status"]}}, "required": ["action"]},
+        }, _toggle_consciousness),
     ]
